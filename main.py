@@ -648,3 +648,155 @@ if d == "account":
         with db() as cc:
             rows = cc.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 20").fetchall()
         txt = "📜 <b>Recent Logs</b>\n"
+        for r in rows:
+            ts = time.strftime("%m-%d %H:%M", time.localtime(r["created_at"]))
+            txt += f"[{ts}] {r['category']}: <code>{r['user_id']}</code> {r['detail'][:60]}\n"
+        await q.edit_message_text(txt or "No logs.",
+                                  reply_markup=admin_menu(), parse_mode=ParseMode.HTML); return
+   # ══════════════════════════════════════════════════════════════════
+#  PAYMENT HANDLERS
+# ══════════════════════════════════════════════════════════════════
+async def precheckout(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await u.pre_checkout_query.answer(ok=True)
+
+async def paid(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id
+    k = u.message.successful_payment.invoice_payload.split(":")[1]
+    add_credits(uid, PACKAGES[k]["credits"])
+    log_event("payment", uid, f"Stars {k}")
+    with db() as cc:
+        cc.execute("""INSERT INTO payments (user_id,package,amount,status,method,created_at,verified_at)
+                      VALUES (?,?,?,?,?,?,?)""",
+                   (uid, k, PACKAGES[k]["bdt"], "success", "stars", now(), now())); cc.commit()
+    await u.message.reply_text(f"✅ +{PACKAGES[k]['credits']} credits!", reply_markup=main_menu(uid))
+    ref = reward_purchase(uid)
+    if ref:
+        try: await c.bot.send_message(ref, f"🎉 Referral bonus! +{REF_PURCHASE_BONUS}")
+        except: pass
+        # ══════════════════════════════════════════════════════════════════
+#  TEXT / MEDIA HANDLERS
+# ══════════════════════════════════════════════════════════════════
+async def broadcast_runner(ctx, admin_id, text):
+    with db() as cc:
+        uids = [r["user_id"] for r in cc.execute("SELECT user_id FROM users WHERE is_blocked=0")]
+    ok = fail = 0
+    for x in uids:
+        try: await ctx.bot.send_message(x, text); ok += 1
+        except: fail += 1
+    log_event("admin", admin_id, f"Broadcast: ok={ok} fail={fail}")
+    try: await ctx.bot.send_message(admin_id, f"📢 Done\n✅ {ok}\n❌ {fail}")
+    except: pass
+
+async def on_text(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id; us = u.effective_user
+    upsert_user(uid, us.username, us.first_name)
+    user = get_user(uid); text = (u.message.text or "").strip()
+    st = STATE.get(uid, "")
+    l = user_lang(uid)
+
+    if st.startswith("txid:"):
+        k = st.split(":")[1]
+        try:
+            with db() as cc:
+                cc.execute("""INSERT INTO payments (user_id,package,amount,txid,status,method,created_at)
+                              VALUES (?,?,?,?,?,?,?)""",
+                           (uid, k, PACKAGES[k]["bdt"], text, "pending", "manual", now())); cc.commit()
+            STATE.pop(uid, None)
+            await u.message.reply_text(t("txid_received", l))
+            for aid in ADMIN_IDS:
+                try: await c.bot.send_message(aid,
+                    f"🔔 Payment <code>{uid}</code> {k} <code>{text}</code>",
+                    parse_mode=ParseMode.HTML)
+                except: pass
+        except: await u.message.reply_text("⚠️ TxID already used.")
+        return
+if st.startswith("broadcast:"):
+        STATE.pop(uid, None)
+        asyncio.create_task(broadcast_runner(c, uid, text))
+        await u.message.reply_text("🚀 Broadcasting..."); return
+
+    if st == "chat":
+        pass
+    elif is_admin(uid):
+        set_setting("system_prompt", text)
+        await u.message.reply_text("✅ System prompt updated."); return
+    else:
+        await u.message.reply_text("Use menu → AI Chat", reply_markup=main_menu(uid)); return
+
+    if user["is_blocked"]:
+        await u.message.reply_text(t("blocked", l)); return
+
+    adm = is_admin(uid)
+    trial_ok = user["trial_text"] < FREE_TEXT
+    if not adm and not trial_ok and user["credits"] < COST_TEXT:
+        await u.message.reply_text(t("credits_empty", l)); return
+
+    m = await u.message.reply_text(t("thinking", l))
+    reply = await ai_chat(uid, text, user["preferred_model"])
+
+    if adm: pass
+    elif trial_ok: inc_trial(uid, "text")
+    else: use_credit(uid, COST_TEXT)
+
+    for i in range(0, len(reply), 4000):
+        if i == 0: await m.edit_text(reply[:4000], reply_markup=main_menu(uid))
+        else: await u.message.reply_text(reply[i:i+4000])
+
+    if user["voice_reply"]:
+        v = await tts(reply)
+        if v: await u.message.reply_voice(io.BytesIO(v))
+
+async def on_photo(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id; user = get_user(uid)
+    st = STATE.get(uid, "")
+    if st == "broadcast:photo":
+        STATE.pop(uid, None)
+        await u.message.reply_text("📷 Photo broadcast not supported in single-file mode. Use text."); return
+    prompt = u.message.caption or ""
+    l = user_lang(uid)
+    if not prompt:
+        await u.message.reply_text("⚠️ Add prompt as caption."); return
+
+    adm = is_admin(uid)
+    trial_ok = user["trial_img"] < FREE_IMG
+    if not adm and not trial_ok and user["credits"] < COST_IMG:
+        await u.message.reply_text(t("credits_empty", l)); return
+
+    m = await u.message.reply_text(t("editing", l))
+    f = await c.bot.get_file(u.message.photo[-1].file_id)
+    buf = io.BytesIO(); await f.download_to_memory(buf)
+    res = await ai_edit(buf.getvalue(), prompt, user["preferred_model"])
+    if not res:
+        await m.edit_text("❌ Failed."); return
+
+    if adm: pass
+    elif trial_ok: inc_trial(uid, "img")
+    else: use_credit(uid, COST_IMG)
+
+    await m.delete()
+    await u.message.reply_photo(io.BytesIO(res), caption="✅ Done!", reply_markup=main_menu(uid))
+
+async def on_voice(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id; us = u.effective_user
+    upsert_user(uid, us.username, us.first_name)
+    user = get_user(uid); l = user_lang(uid)
+    if user["is_blocked"]:
+        await u.message.reply_text(t("blocked", l)); return
+
+    adm = is_admin(uid)
+    trial_ok = user["trial_text"] < FREE_TEXT
+    if not adm and not trial_ok and user["credits"] < COST_TEXT:
+        await u.message.reply_text(t("credits_empty", l)); return
+
+    m = await u.message.reply_text(t("listening", l))
+    f = await c.bot.get_file(u.message.voice.file_id)
+    buf = io.BytesIO(); await f.download_to_memory(buf)
+    text = await stt(buf.getvalue())
+    if not text:
+        await m.edit_text("❌ Couldn't understand."); return
+
+    await m.edit_text(f"📝 <i>{text}</i>\n\n🤔...", parse_mode=ParseMode.HTML)
+    reply = await ai_chat(uid, text, user["preferred_model"])
+
+    if adm: pass
+    elif trial_ok: inc_trial(uid, "text")
