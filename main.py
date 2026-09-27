@@ -197,3 +197,104 @@ def use_credit(uid, n):
             c.execute("UPDATE users SET credits=credits-? WHERE user_id=?", (n, uid)); c.commit()
             return True
     return False
+
+def inc_trial(uid, kind="text"):
+    col = "trial_text" if kind == "text" else "trial_img"
+    with db() as c:
+        c.execute(f"UPDATE users SET {col}={col}+1 WHERE user_id=?", (uid,)); c.commit()
+
+def set_lang_db(uid, lang):
+    with db() as c:
+        c.execute("UPDATE users SET lang=? WHERE user_id=?", (lang, uid)); c.commit()
+
+def log_event(cat, uid, det):
+    with db() as c:
+        c.execute("INSERT INTO logs (category,user_id,detail,created_at) VALUES (?,?,?,?)",
+                  (cat, uid, det, now())); c.commit()
+
+def track_group(chat_id, chat_title, uid):
+    with db() as c:
+        c.execute("""INSERT INTO group_stats (chat_id,chat_title,user_id,calls,last_call)
+                     VALUES (?,?,?,1,?)
+                     ON CONFLICT(chat_id,user_id) DO UPDATE SET
+                       calls=calls+1, last_call=excluded.last_call,
+                       chat_title=excluded.chat_title""",
+                  (chat_id, chat_title, uid, now())); c.commit()
+
+# ══════════════════════════════════════════════════════════════════
+#  AI
+# ══════════════════════════════════════════════════════════════════
+PROVIDERS = {}
+if OPENAI_API_KEY:
+    PROVIDERS["gpt"] = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE)
+if GEMINI_API_KEY:
+    PROVIDERS["gemini"] = AsyncOpenAI(api_key=GEMINI_API_KEY,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+if OPENROUTER_API_KEY:
+    PROVIDERS["claude"] = AsyncOpenAI(api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1")
+
+MODEL_MAP   = {"gpt":"gpt-4o-mini","gemini":"gemini-2.0-flash","claude":"anthropic/claude-3.5-sonnet"}
+MODEL_NAMES = {"gpt":"🤖 GPT-4o Mini","gemini":"✨ Gemini 2.0 Flash","claude":"🎭 Claude 3.5"}
+_history = {}
+
+async def ai_chat(uid, msg, model="gpt"):
+    if model not in PROVIDERS:
+        model = next(iter(PROVIDERS), None)
+        if not model: return "❌ No AI configured."
+    hist = _history.setdefault(uid, [])
+    hist.append({"role":"user","content":msg})
+    try:
+        r = await PROVIDERS[model].chat.completions.create(
+            model=MODEL_MAP[model],
+            messages=[{"role":"system","content":get_setting("system_prompt")}]+hist[-20:])
+        out = r.choices[0].message.content
+        hist.append({"role":"assistant","content":out})
+        return out
+    except Exception as e:
+        return f"❌ {model} error: {e}"
+
+async def ai_edit(img_bytes, prompt, model="gpt"):
+    if model not in PROVIDERS: return None
+    try:
+        f = io.BytesIO(img_bytes); f.name = "in.png"
+        r = await PROVIDERS[model].images.edit(
+            model=IMAGE_MODEL, image=f, prompt=prompt, size="1024x1024")
+        return base64.b64decode(r.data[0].b64_json)
+    except Exception as e:
+        log.warning(f"img edit: {e}"); return None
+
+async def stt(ogg):
+    if "gpt" not in PROVIDERS: return ""
+    try:
+        f = io.BytesIO(ogg); f.name = "v.ogg"
+        r = await PROVIDERS["gpt"].audio.transcriptions.create(
+            model="whisper-1", file=f, response_format="text")
+        return r if isinstance(r, str) else r.text
+    except Exception as e:
+        log.warning(f"stt: {e}"); return ""
+
+async def tts(text):
+    if "gpt" not in PROVIDERS: return None
+    try:
+        r = await PROVIDERS["gpt"].audio.speech.create(
+            model="tts-1", voice="alloy", input=text[:4000])
+        return r.read()
+    except Exception as e:
+        log.warning(f"tts: {e}"); return None
+
+def reset_history(uid): _history.pop(uid, None)
+
+# ══════════════════════════════════════════════════════════════════
+#  REFERRAL
+# ══════════════════════════════════════════════════════════════════
+def gen_ref_code(uid):
+    with db() as c:
+        r = c.execute("SELECT ref_code FROM users WHERE user_id=?", (uid,)).fetchone()
+        if r and r["ref_code"]: return r["ref_code"]
+        code = "AI" + str(uid)[-6:] + "".join(random.choices(string.ascii_uppercase, k=2))
+        c.execute("UPDATE users SET ref_code=? WHERE user_id=?", (code, uid)); c.commit()
+        return code
+
+def apply_ref(new_uid, code):
+    with db() as c:
