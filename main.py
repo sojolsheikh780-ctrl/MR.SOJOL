@@ -998,3 +998,164 @@ def start_web():
             revenue  = c.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success'").fetchone()["s"]
             pending  = c.execute("SELECT COUNT(*) n FROM payments WHERE status='pending'").fetchone()["n"]
             refs     = c.execute("SELECT COUNT(*) n FROM referrals").fetchone()["n"]
+            gs       = group_summary()
+            days, counts, revs = [], [], []
+            for i in range(13, -1, -1):
+                d = now() - i*86400
+                s = d - d % 86400; e = s + 86400
+                n = c.execute("SELECT COUNT(*) n FROM users WHERE joined_at>=? AND joined_at<?", (s,e)).fetchone()["n"]
+                r = c.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success' AND created_at>=? AND created_at<?",
+                              (s,e)).fetchone()["s"]
+                days.append(f'"{time.strftime("%m-%d", time.localtime(s))}"')
+                counts.append(str(n)); revs.append(str(r))
+        return render("dashboard",
+            total_u=total_u, paying_u=paying_u, revenue=revenue, pending=pending,
+            refs=refs, groups=gs["groups"],
+            days="[" + ",".join(days) + "]",
+            counts="[" + ",".join(counts) + "]",
+            revs="[" + ",".join(revs) + "]")
+
+    @app.get("/users", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def users(req: Request, q: str = ""):
+        with db() as c:
+            if q:
+                rows = c.execute("""SELECT * FROM users WHERE CAST(user_id AS TEXT) LIKE ?
+                                    OR username LIKE ? ORDER BY joined_at DESC LIMIT 200""",
+                                 (f"%{q}%", f"%{q}%")).fetchall()
+            else:
+                rows = c.execute("SELECT * FROM users ORDER BY joined_at DESC LIMIT 200").fetchall()
+        html_rows = ""
+        for r in rows:
+            blocked = "🚫" if r["is_blocked"] else "✅"
+            action = (f'<form method="post" action="/users/{r["user_id"]}/unblock" style="display:inline">'
+                      f'<button class="btn ok">✅</button></form>' if r["is_blocked"] else
+                      f'<form method="post" action="/users/{r["user_id"]}/block" style="display:inline">'
+                      f'<button class="btn no">🚫</button></form>')
+            html_rows += (f'<tr><td><code>{r["user_id"]}</code></td>'
+                          f'<td>@{r["username"] or "-"}</td><td>{r["credits"]}</td>'
+                          f'<td>{r["trial_text"]}t/{r["trial_img"]}i</td>'
+                          f'<td>{r["ref_count"]}</td><td>{blocked}</td><td>{action}</td></tr>')
+        return render("users", q=q, ROWS=html_rows)
+
+    @app.post("/users/{uid}/block", dependencies=[Depends(auth)])
+    async def block_user(uid: int):
+        with db() as c:
+            c.execute("UPDATE users SET is_blocked=1 WHERE user_id=?", (uid,)); c.commit()
+        return RedirectResponse("/users", status_code=302)
+
+    @app.post("/users/{uid}/unblock", dependencies=[Depends(auth)])
+    async def unblock_user(uid: int):
+        with db() as c:
+            c.execute("UPDATE users SET is_blocked=0 WHERE user_id=?", (uid,)); c.commit()
+        return RedirectResponse("/users", status_code=302)
+
+    @app.get("/payments", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def pays(req: Request):
+        with db() as c:
+            rows = c.execute("SELECT * FROM payments ORDER BY id DESC LIMIT 200").fetchall()
+        html_rows = ""
+        for r in rows:
+            action = ""
+            if r["status"] == "pending":
+                action = (f'<form method="post" action="/payments/{r["id"]}/approve" style="display:inline">'
+                          f'<button class="btn ok">✓</button></form> '
+                          f'<form method="post" action="/payments/{r["id"]}/reject" style="display:inline">'
+                          f'<button class="btn no">✗</button></form>')
+            html_rows += (f'<tr><td>{r["id"]}</td><td><code>{r["user_id"]}</code></td>'
+                          f'<td>{r["package"]}</td><td>৳{r["amount"]}</td>'
+                          f'<td>{r["method"]}</td><td><code>{r["txid"] or "-"}</code></td>'
+                          f'<td>{r["status"]}</td><td>{action}</td></tr>')
+        return render("payments", ROWS=html_rows)
+         @app.post("/payments/{pid}/approve", dependencies=[Depends(auth)])
+    async def approve(pid: int):
+        with db() as c:
+            p = c.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()
+        if p:
+            add_credits(p["user_id"], PACKAGES[p["package"]]["credits"])
+            with db() as c:
+                c.execute("UPDATE payments SET status='success', verified_at=? WHERE id=?", (now(), pid)); c.commit()
+            reward_purchase(p["user_id"])
+        return RedirectResponse("/payments", status_code=302)
+
+    @app.post("/payments/{pid}/reject", dependencies=[Depends(auth)])
+    async def reject(pid: int):
+        with db() as c:
+            c.execute("UPDATE payments SET status='failed' WHERE id=?", (pid,)); c.commit()
+        return RedirectResponse("/payments", status_code=302)
+
+    @app.get("/leaderboard", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def leader(req: Request):
+        lb = ref_leaderboard(50)
+        html = "<h1>🏆 Referral Leaderboard</h1><table><tr><th>#</th><th>User</th><th>Username</th><th>Refs</th><th>Rewarded</th></tr>"
+        for i, r in enumerate(lb, 1):
+            html += (f'<tr><td>{i}</td><td><code>{r["user_id"]}</code></td>'
+                     f'<td>@{r["username"] or r["first_name"] or "-"}</td>'
+                     f'<td>{r["ref_count"]}</td><td>{r["rewarded"]}</td></tr>')
+        html += "</table>"
+        return render("leaderboard", CONTENT=html)
+
+    @app.get("/groups", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def grps(req: Request):
+        gs = top_groups(50)
+        html = "<h1>👥 Top Groups</h1><table><tr><th>Group</th><th>Calls</th><th>Users</th></tr>"
+        for g in gs:
+            html += f'<tr><td>{g["chat_title"] or g["chat_id"]}</td><td>{g["calls"]}</td><td>{g["users"]}</td></tr>'
+        html += "</table>"
+        return render("leaderboard", CONTENT=html)
+
+    @app.get("/broadcast", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def bc_page(req: Request):
+        return render("broadcast", MSG="")
+
+    @app.post("/broadcast", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def bc_send(req: Request, message: str = Form(...)):
+        if not BOT_INSTANCE:
+            return render("broadcast", MSG='<div class="card">❌ Bot not ready</div>')
+        with db() as c:
+            uids = [r["user_id"] for r in c.execute("SELECT user_id FROM users WHERE is_blocked=0")]
+        ok = fail = 0
+        for x in uids:
+            try: await BOT_INSTANCE.send_message(x, message); ok += 1
+            except: fail += 1
+        return render("broadcast", MSG=f'<div class="card">✅ Sent: {ok} | ❌ Failed: {fail}</div>')
+
+    uvicorn.run(app, host="0.0.0.0", port=WEB_PORT, log_level="warning")
+     # ══════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════
+def main():
+    global BOT_INSTANCE
+
+    db_init()
+    log.info("🤖 Starting AI Bot...")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    BOT_INSTANCE = app.bot
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CommandHandler("user", cmd_user))
+    app.add_handler(CommandHandler("block", cmd_block))
+    app.add_handler(CommandHandler("unblock", cmd_unblock))
+    app.add_handler(CommandHandler("dm", cmd_dm))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(PreCheckoutQueryHandler(precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, paid))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_group))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, on_text))
+
+    if WEB_ENABLED:
+        threading.Thread(target=start_web, daemon=True).start()
+        log.info(f"🌐 Web dashboard: http://0.0.0.0:{WEB_PORT}")
+
+    log.info("✅ Bot polling started.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()                                                                                                                                         
