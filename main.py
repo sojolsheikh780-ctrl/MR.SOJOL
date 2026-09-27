@@ -497,3 +497,154 @@ def gen_ref_code(uid):
 
 def apply_ref(new_uid, code):
     with db() as c:
+        lang = d.split("_")[1]
+        set_lang_db(uid, lang)
+        await q.edit_message_text(t("lang_changed", lang), reply_markup=main_menu(uid)); return
+
+    if d == "ai_chat":  STATE[uid]="chat";  await q.edit_message_text(t("ask_question",l), reply_markup=back()); return
+    if d == "ai_voice": STATE[uid]="voice"; await q.edit_message_text(t("send_voice",l), reply_markup=back()); return
+    if d == "ai_img":   STATE[uid]="image"; await q.edit_message_text(t("send_image",l), reply_markup=back()); return
+    if d == "pick_model": await q.edit_message_text(t("pick_model",l), reply_markup=model_menu()); return
+
+    if d.startswith("model_"):
+        m = d.split("_")[1]
+        with db() as cc:
+            cc.execute("UPDATE users SET preferred_model=? WHERE user_id=?", (m, uid)); cc.commit()
+        await q.edit_message_text(f"✅ {MODEL_NAMES[m]}", reply_markup=back()); return
+
+    if d == "buy": await q.edit_message_text("💰 Packages:", reply_markup=buy_menu()); return
+    if d.startswith("pkg_"):
+        k = d[4:]
+        await q.edit_message_text(
+            f"📦 {PACKAGES[k]['credits']} credits\n💰 ৳{PACKAGES[k]['bdt']}",
+            reply_markup=pkg_menu(k)); return
+    if d.startswith("star_"):
+        k = d[5:]; p = PACKAGES[k]
+        await c.bot.send_invoice(chat_id=u.effective_chat.id,
+            title=f"{p['credits']} Credits", description=f"৳{p['bdt']}",
+            payload=f"credits:{k}", provider_token="", currency="XTR",
+            prices=[LabeledPrice(label=f"{p['credits']} credits", amount=p['bdt']*STARS_MULT)])
+        return
+    if d.startswith("manual_"):
+        k = d[7:]; p = PACKAGES[k]
+        STATE[uid] = f"txid:{k}"
+        await q.edit_message_text(
+            f"📱 Send Money ৳{p['bdt']} → <code>{PAYMENT_NUMBER}</code>\n"
+            f"⚠️ No Agent\n\nSend TxID 👇",
+            reply_markup=back(), parse_mode=ParseMode.HTML); return
+
+    if d == "referral":
+        code = gen_ref_code(uid)
+        bot_un = (await c.bot.get_me()).username
+        link = f"https://t.me/{bot_un}?start=ref_{code}"
+        s = ref_stats(uid)
+        await q.edit_message_text(
+            f"🎁 <b>Refer & Earn</b>\n\n🔗 <code>{link}</code>\n\n"
+            f"👥 Referred: {s['total']}\n💎 Bonuses: {s['purchased']}\n\n"
+            f"💰 Friend join → +{REF_SIGNUP_BONUS}\n"
+            f"💰 Friend purchase → +{REF_PURCHASE_BONUS}\n"
+            f"🎉 Friend পাবে +{NEW_USER_BONUS} free",
+            reply_markup=back(), parse_mode=ParseMode.HTML); return
+if d == "account":
+        left = f"{FREE_TEXT-usr['trial_text']}t / {FREE_IMG-usr['trial_img']}i"
+        vr = "ON" if usr["voice_reply"] else "OFF"
+        await q.edit_message_text(
+            f"👤 <b>Account</b>\n🆔 <code>{uid}</code>\n💎 Credits: {usr['credits']}\n"
+            f"🧠 Model: {MODEL_NAMES.get(usr['preferred_model'],'GPT')}\n"
+            f"🔊 Voice: {vr}\n🌐 Lang: {usr['lang']}\n🎁 Free left: {left}",
+            reply_markup=M([
+                [B(f"🔊 Voice Reply: {vr}", cb_data="tog_voice")],
+                [B("⬅️ Back", cb_data="back")]]),
+            parse_mode=ParseMode.HTML); return
+    if d == "tog_voice":
+        with db() as cc:
+            cc.execute("UPDATE users SET voice_reply=1-voice_reply WHERE user_id=?", (uid,)); cc.commit()
+        return await cb(u, c)
+
+    if d == "reset": reset_history(uid); await q.edit_message_text("✅ Cleared.", reply_markup=back()); return
+    if d == "support": await q.edit_message_text("📞 @YourSupport", reply_markup=back()); return
+
+    # ── Admin ──
+    if not is_admin(uid): return
+    if d == "ad_stats":
+        with db() as cc:
+            t_ = cc.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+            a_ = cc.execute("SELECT COUNT(*) n FROM users WHERE credits>0").fetchone()["n"]
+            r_ = cc.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success'").fetchone()["s"]
+            g_ = group_summary()
+        await q.edit_message_text(
+            f"📊 Users: {t_}\n💎 Paying: {a_}\n💰 ৳{r_}\n"
+            f"👥 Groups: {g_['groups']}\n🔊 Calls: {g_['calls']}",
+            reply_markup=admin_menu()); return
+
+    if d == "ad_pay":
+        with db() as cc:
+            rows = cc.execute("SELECT * FROM payments WHERE status='pending' ORDER BY id DESC LIMIT 10").fetchall()
+        if not rows: await q.edit_message_text("No pending.", reply_markup=admin_menu()); return
+        txt = "💳 <b>Pending</b>\n"; btns=[]
+        for r in rows:
+            txt += f"#{r['id']} <code>{r['user_id']}</code> {r['package']} <code>{r['txid']}</code>\n"
+            btns.append([B(f"✅ #{r['id']}", cb_data=f"ok_{r['id']}"), B(f"❌ #{r['id']}", cb_data=f"no_{r['id']}")])
+        btns.append([B("⬅️", cb_data="back")])
+        await q.edit_message_text(txt, reply_markup=M(btns), parse_mode=ParseMode.HTML); return
+    if d.startswith("ok_"):
+        pid = int(d.split("_")[1])
+        with db() as cc:
+            p = cc.execute("SELECT * FROM payments WHERE id=?", (pid,)).fetchone()
+        if p:
+            add_credits(p["user_id"], PACKAGES[p["package"]]["credits"])
+            with db() as cc:
+                cc.execute("UPDATE payments SET status='success', verified_at=? WHERE id=?", (now(), pid)); cc.commit()
+            try: await c.bot.send_message(p["user_id"], f"✅ +{PACKAGES[p['package']]['credits']} credits!")
+            except: pass
+            ref = reward_purchase(p["user_id"])
+            if ref:
+                try: await c.bot.send_message(ref, f"🎉 Referral bonus! +{REF_PURCHASE_BONUS}")
+                except: pass
+        await q.edit_message_text(f"✅ #{pid}", reply_markup=admin_menu()); return
+    if d.startswith("no_"):
+        pid = int(d.split("_")[1])
+        with db() as cc:
+            cc.execute("UPDATE payments SET status='failed' WHERE id=?", (pid,)); cc.commit()
+        await q.edit_message_text(f"❌ #{pid}", reply_markup=admin_menu()); return
+
+    if d == "ad_users":
+        with db() as cc:
+            rows = cc.execute("SELECT user_id,username,credits,is_blocked FROM users ORDER BY joined_at DESC LIMIT 15").fetchall()
+        txt = "👥 <b>Recent Users</b>\n"
+        for r in rows:
+            flag = "🚫" if r["is_blocked"] else "✅"
+            txt += f"{flag} <code>{r['user_id']}</code> @{r['username'] or '-'} | 💎{r['credits']}\n"
+        txt += "\nCommands: /user <id> · /block <id> · /unblock <id> · /dm <id> <msg>"
+        await q.edit_message_text(txt, reply_markup=admin_menu(), parse_mode=ParseMode.HTML); return
+
+    if d == "ad_ref":
+        lb = ref_leaderboard(10)
+        txt = "🏆 <b>Referral Leaderboard</b>\n\n"
+        for i, r in enumerate(lb, 1):
+            txt += f"{i}. <code>{r['user_id']}</code> @{r['username'] or r['first_name'] or '-'} → {r['ref_count']}\n"
+        await q.edit_message_text(txt or "No referrals yet.",
+                                  reply_markup=admin_menu(), parse_mode=ParseMode.HTML); return
+
+    if d == "ad_grp":
+        gs = top_groups(15)
+        txt = "👥 <b>Top Groups</b>\n\n"
+        for g in gs:
+            txt += f"• {g['chat_title'] or g['chat_id']} — {g['calls']} calls, {g['users']} users\n"
+        await q.edit_message_text(txt or "No activity.",
+                                  reply_markup=admin_menu(), parse_mode=ParseMode.HTML); return
+
+    if d == "ad_bc":
+        kb = M([
+            [B("✉️ Text", cb_data="bc_text")],
+            [B("⬅️ Back", cb_data="back")]])
+        await q.edit_message_text("📢 Send broadcast text. Next message will be sent to all.",
+                                  reply_markup=kb); return
+    if d.startswith("bc_"):
+        STATE[uid] = f"broadcast:{d[3:]}"
+        await q.edit_message_text("Send content now:", reply_markup=back()); return
+
+    if d == "ad_log":
+        with db() as cc:
+            rows = cc.execute("SELECT * FROM logs ORDER BY id DESC LIMIT 20").fetchall()
+        txt = "📜 <b>Recent Logs</b>\n"
