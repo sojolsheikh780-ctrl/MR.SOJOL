@@ -800,3 +800,201 @@ async def on_voice(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     if adm: pass
     elif trial_ok: inc_trial(uid, "text")
+    else: use_credit(uid, COST_TEXT)
+
+    for i in range(0, len(reply), 4000):
+        if i == 0: await m.edit_text(reply[:4000], reply_markup=main_menu(uid))
+        else: await u.message.reply_text(reply[i:i+4000])
+
+    if user["voice_reply"]:
+        v = await tts(reply)
+        if v: await u.message.reply_voice(io.BytesIO(v))
+
+async def on_group(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = u.effective_message
+    if not msg or msg.chat.type not in ("group","supergroup"): return
+    text = msg.text or msg.caption or ""
+    bot_un = (await c.bot.get_me()).username
+
+    query = ""
+    if text.startswith("/ai"): query = text[3:].strip()
+    elif msg.reply_to_message and msg.reply_to_message.from_user.id == c.bot.id: query = text
+    elif f"@{bot_un}" in text: query = text.replace(f"@{bot_un}","").strip()
+    if not query: return
+
+    uid = msg.from_user.id
+    upsert_user(uid, msg.from_user.username, msg.from_user.first_name)
+    user = get_user(uid)
+    adm = is_admin(uid)
+    trial_ok = user["trial_text"] < FREE_TEXT
+    if not adm and not trial_ok and user["credits"] < COST_TEXT:
+        await msg.reply_text(f"@{msg.from_user.username} 💎 Credits শেষ।"); return
+
+    sent = await msg.reply_text("🤔...")
+    reply = await ai_chat(uid, query, user["preferred_model"])
+
+    if adm: pass
+    elif trial_ok: inc_trial(uid, "text")
+    else: use_credit(uid, COST_TEXT)
+
+    for i in range(0, len(reply), 4000):
+        if i == 0: await sent.edit_text(reply[:4000])
+        else: await msg.reply_text(reply[i:i+4000])
+
+    track_group(msg.chat.id, msg.chat.title or "", uid)
+    log_event("group", uid, f"{msg.chat.id}: {query[:60]}")   
+
+    # ══════════════════════════════════════════════════════════════════
+#  WEB DASHBOARD (FastAPI)
+# ══════════════════════════════════════════════════════════════════
+WEB_TEMPLATES = {
+"base": """<!DOCTYPE html><html><head><meta charset="utf-8"><title>AI Bot Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body{font-family:system-ui;background:#0f1720;color:#e6edf3;margin:0}
+nav{background:#161b22;padding:14px 24px;border-bottom:1px solid #30363d}
+nav a{color:#58a6ff;margin-right:18px;text-decoration:none;font-weight:600;font-size:14px}
+.container{max-width:1300px;margin:28px auto;padding:0 24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px}
+.card h3{margin:0;color:#8b949e;font-size:12px;text-transform:uppercase}
+.card .v{font-size:26px;font-weight:700;margin-top:6px}
+table{width:100%;border-collapse:collapse;background:#161b22;border-radius:10px;overflow:hidden}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #30363d;font-size:14px}
+th{background:#21262d;color:#8b949e;font-size:12px;text-transform:uppercase}
+tr:hover{background:#1c2128}
+.btn{padding:6px 12px;border:0;border-radius:6px;cursor:pointer;font-weight:600;color:#fff;text-decoration:none;font-size:13px}
+.ok{background:#238636}.no{background:#da3633}.blue{background:#1f6feb}
+input,textarea{padding:10px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-family:inherit}
+h1{margin-top:0}
+</style></head><body>
+<nav>
+  <a href="/">📊 Dashboard</a><a href="/users">👥 Users</a>
+  <a href="/payments">💳 Payments</a><a href="/leaderboard">🏆 Referrals</a>
+  <a href="/groups">👥 Groups</a><a href="/broadcast">📢 Broadcast</a>
+  <a href="/logout" style="float:right;color:#8b949e">🚪 Logout</a>
+</nav>
+<div class="container">{{BODY}}</div></body></html>""",
+
+"login": """<!DOCTYPE html><html><head><title>Login</title><style>
+body{background:#0f1720;color:#e6edf3;font-family:system-ui;display:flex;
+align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#161b22;padding:40px;border-radius:12px;border:1px solid #30363d;width:320px}
+input{width:100%;padding:12px;margin:12px 0;border-radius:6px;border:1px solid #30363d;
+background:#0d1117;color:#e6edf3;box-sizing:border-box}
+button{width:100%;padding:12px;background:#238636;color:#fff;border:0;border-radius:6px;
+font-weight:700;cursor:pointer}
+.err{color:#f85149;font-size:13px}
+</style></head><body>
+<form class="box" method="post" action="/login">
+<h2 style="margin-top:0">🔐 Admin Login</h2>
+<input type="password" name="password" placeholder="Password" required autofocus>
+{{ERROR}}
+<button type="submit">Login</button></form></body></html>""",
+
+"dashboard": """{% extends base %}{% block body %}
+<h1>📊 Dashboard</h1>
+<div class="cards">
+  <div class="card"><h3>Users</h3><div class="v">{{total_u}}</div></div>
+  <div class="card"><h3>Paying</h3><div class="v">{{paying_u}}</div></div>
+  <div class="card"><h3>Revenue ৳</h3><div class="v">{{revenue}}</div></div>
+  <div class="card"><h3>Pending</h3><div class="v">{{pending}}</div></div>
+  <div class="card"><h3>Referrals</h3><div class="v">{{refs}}</div></div>
+  <div class="card"><h3>Groups</h3><div class="v">{{groups}}</div></div>
+</div>
+<div class="cards">
+  <div class="card" style="grid-column:span 3"><h3>Users (14d)</h3><canvas id="uc" height="80"></canvas></div>
+  <div class="card" style="grid-column:span 3"><h3>Revenue (14d)</h3><canvas id="rc" height="80"></canvas></div>
+</div>
+<script>
+new Chart(document.getElementById('uc'),{type:'line',
+data:{labels:{{days|safe}},datasets:[{data:{{counts|safe}},borderColor:'#58a6ff',tension:0.3,fill:false}]},
+options:{plugins:{legend:{display:false}}}});
+new Chart(document.getElementById('rc'),{type:'bar',
+data:{labels:{{days|safe}},datasets:[{data:{{revs|safe}},backgroundColor:'#238636'}]},
+options:{plugins:{legend:{display:false}}}});
+</script>{% endblock %}""",
+
+"users": """{% extends base %}{% block body %}
+<h1>👥 Users</h1>
+<form method="get" style="margin-bottom:16px;display:flex;gap:8px">
+  <input name="q" value="{{q}}" placeholder="Search ID or username" style="width:320px">
+  <button class="btn ok">Search</button>
+</form>
+<table><tr><th>ID</th><th>Username</th><th>Credits</th><th>Trial</th><th>Refs</th><th>Blocked</th><th>Actions</th></tr>
+{{ROWS}}
+</table>{% endblock %}""",
+
+"payments": """{% extends base %}{% block body %}
+<h1>💳 Payments</h1>
+<table><tr><th>#</th><th>User</th><th>Pkg</th><th>৳</th><th>Method</th><th>TxID</th><th>Status</th><th>Action</th></tr>
+{{ROWS}}
+</table>{% endblock %}""",
+
+"leaderboard": """{% extends base %}{% block body %}
+{{CONTENT}}{% endblock %}""",
+
+"broadcast": """{% extends base %}{% block body %}
+<h1>📢 Broadcast</h1>
+{{MSG}}
+<form method="post" action="/broadcast">
+<textarea name="message" rows="8" style="width:100%;max-width:700px" placeholder="Message..."></textarea><br><br>
+<button class="btn ok" style="padding:12px 24px">Send to All</button>
+</form>{% endblock %}""",
+}
+
+def render(name, **ctx):
+    from string import Template
+    base = WEB_TEMPLATES["base"].replace("{{BODY}}", "{% block body %}{% endblock %}") \
+        if name != "login" else WEB_TEMPLATES["base"]
+    body = WEB_TEMPLATES[name]
+    # Simple template merge: replace {% extends base %} with base content
+    html = body.replace("{% extends base %}", WEB_TEMPLATES["base"])
+    # Replace {{block ...}} placeholders in base with nothing
+    # Handle block extraction
+    if "{% block body %}" in body:
+        inner = body.split("{% block body %}")[1].split("{% endblock %}")[0]
+        html = WEB_TEMPLATES["base"].replace("{{BODY}}", inner)
+    # Replace {{KEY}}
+    for k, v in ctx.items():
+        html = html.replace("{{"+k+"}}", str(v))
+    return html
+
+BOT_INSTANCE = None
+
+def start_web():
+    from fastapi import FastAPI, Request, Form, Depends, HTTPException
+    from fastapi.responses import HTMLResponse, RedirectResponse
+    from starlette.middleware.sessions import SessionMiddleware
+    import uvicorn
+
+    app = FastAPI(title="AI Bot Admin")
+    app.add_middleware(SessionMiddleware, secret_key=WEB_SECRET)
+
+    def auth(req: Request):
+        if not req.session.get("ok"):
+            raise HTTPException(status_code=302, headers={"Location":"/login"})
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(req: Request):
+        return render("login", ERROR="")
+
+    @app.post("/login")
+    async def login(req: Request, password: str = Form(...)):
+        if password == WEB_PASSWORD:
+            req.session["ok"] = True
+            return RedirectResponse("/", status_code=302)
+        return render("login", ERROR='<div class="err">Wrong password</div>')
+
+    @app.get("/logout")
+    async def logout(req: Request):
+        req.session.clear(); return RedirectResponse("/login")
+
+    @app.get("/", response_class=HTMLResponse, dependencies=[Depends(auth)])
+    async def dash(req: Request):
+        with db() as c:
+            total_u  = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+            paying_u = c.execute("SELECT COUNT(*) n FROM users WHERE credits>0").fetchone()["n"]
+            revenue  = c.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success'").fetchone()["s"]
+            pending  = c.execute("SELECT COUNT(*) n FROM payments WHERE status='pending'").fetchone()["n"]
+            refs     = c.execute("SELECT COUNT(*) n FROM referrals").fetchone()["n"]
