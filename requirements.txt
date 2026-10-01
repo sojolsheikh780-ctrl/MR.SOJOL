@@ -3,3 +3,5 @@ google-generativeai
 openai
 flask
 gunicorn
+fastapi
+uvicorn
