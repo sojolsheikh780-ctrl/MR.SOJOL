@@ -552,7 +552,7 @@ if d == "account":
             f"👤 <b>Account</b>\n🆔 <code>{uid}</code>\n💎 Credits: {usr['credits']}\n"
             f"🧠 Model: {MODEL_NAMES.get(usr['preferred_model'],'GPT')}\n"
             f"🔊 Voice: {vr}\n🌐 Lang: {usr['lang']}\n🎁 Free left: {left}",
-                    reply_markup=M([
+                   reply_markup=M([
             [B(f"🔊 Voice Reply: {vr}", cb_data="tog_voice")],
             [B("⬅️ Back", cb_data="back")]]),
         parse_mode=ParseMode.HTML)
@@ -566,19 +566,18 @@ if d == "tog_voice":
 if d == "reset": reset_history(uid); await q.edit_message_text("✅ Cleared.", reply_markup=back()); return
 if d == "support": await q.edit_message_text("📞 @YourSupport", reply_markup=back()); return
 
-    # ── Admin ──
-    if not is_admin(uid): return
-    if d == "ad_stats":
-        with db() as cc:
-            t_ = cc.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
-            a_ = cc.execute("SELECT COUNT(*) n FROM users WHERE credits>0").fetchone()["n"]
-            r_ = cc.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success'").fetchone()["s"]
-            g_ = group_summary()
-        await q.edit_message_text(
-            f"📊 Users: {t_}\n💎 Paying: {a_}\n💰 ৳{r_}\n"
-            f"👥 Groups: {g_['groups']}\n🔊 Calls: {g_['calls']}",
-            reply_markup=admin_menu()); return
-
+# ── Admin ──
+if not is_admin(uid): return
+if d == "ad_stats":
+    with db() as cc:
+        t_ = cc.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        a_ = cc.execute("SELECT COUNT(*) n FROM users WHERE credits>0").fetchone()["n"]
+        r_ = cc.execute("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='success'").fetchone()["s"]
+        g_ = group_summary()
+    await q.edit_message_text(
+        f"📊 Users: {t_}\n💎 Paying: {a_}\n💰 ৳{r_}\n"
+        f"👥 Groups: {g_['groups']}\n🔊 Calls: {g_['calls']}",
+        reply_markup=admin_menu()); return
     if d == "ad_pay":
         with db() as cc:
             rows = cc.execute("SELECT * FROM payments WHERE status='pending' ORDER BY id DESC LIMIT 10").fetchall()
