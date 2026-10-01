@@ -552,18 +552,19 @@ if d == "account":
             f"👤 <b>Account</b>\n🆔 <code>{uid}</code>\n💎 Credits: {usr['credits']}\n"
             f"🧠 Model: {MODEL_NAMES.get(usr['preferred_model'],'GPT')}\n"
             f"🔊 Voice: {vr}\n🌐 Lang: {usr['lang']}\n🎁 Free left: {left}",
-            reply_markup=M([
-                [B(f"🔊 Voice Reply: {vr}", cb_data="tog_voice")],
-                [B("⬅️ Back", cb_data="back")]]),
-            parse_mode=ParseMode.HTML)
-        return
-    if d == "tog_voice":
-        with db() as cc:
-            cc.execute("UPDATE users SET         voice_reply=1-voice_reply WHERE     user_id=?", (uid,)); cc.commit()
+                    reply_markup=M([
+            [B(f"🔊 Voice Reply: {vr}", cb_data="tog_voice")],
+            [B("⬅️ Back", cb_data="back")]]),
+        parse_mode=ParseMode.HTML)
+    return
+
+if d == "tog_voice":
+    with db() as cc:
+        cc.execute("UPDATE users SET voice_reply=1-voice_reply WHERE user_id=?", (uid,)); cc.commit()
     return await cb(u, c)
 
-    if d == "reset": reset_history(uid); await q.edit_message_text("✅ Cleared.", reply_markup=back()); return
-    if d == "support": await q.edit_message_text("📞 @YourSupport", reply_markup=back()); return
+if d == "reset": reset_history(uid); await q.edit_message_text("✅ Cleared.", reply_markup=back()); return
+if d == "support": await q.edit_message_text("📞 @YourSupport", reply_markup=back()); return
 
     # ── Admin ──
     if not is_admin(uid): return
