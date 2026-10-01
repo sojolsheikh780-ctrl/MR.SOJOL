@@ -555,11 +555,12 @@ if d == "account":
             reply_markup=M([
                 [B(f"🔊 Voice Reply: {vr}", cb_data="tog_voice")],
                 [B("⬅️ Back", cb_data="back")]]),
-            parse_mode=ParseMode.HTML); return
+            parse_mode=ParseMode.HTML)
+        return
     if d == "tog_voice":
         with db() as cc:
-            cc.execute("UPDATE users SET voice_reply=1-voice_reply WHERE user_id=?", (uid,)); cc.commit()
-        return await cb(u, c)
+            cc.execute("UPDATE users SET         voice_reply=1-voice_reply WHERE     user_id=?", (uid,)); cc.commit()
+    return await cb(u, c)
 
     if d == "reset": reset_history(uid); await q.edit_message_text("✅ Cleared.", reply_markup=back()); return
     if d == "support": await q.edit_message_text("📞 @YourSupport", reply_markup=back()); return
