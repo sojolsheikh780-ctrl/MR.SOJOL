@@ -1,3 +1,5 @@
 python-telegram-bot
 google-generativeai
 openai
+flask
+gunicorn
